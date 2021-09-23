@@ -1,13 +1,13 @@
 /** ---------------------------------------------------------------------------------------------------
-    ESP NOW - Auto-forming mesh - ESP8266 Node
+    ESP NOW - Auto-forming mesh - ESP32 Node
 
-    Date: 2021-09-21
+    Date: 2021-09-22
 
     Author: David Alexis <https://github.com/davealexis>
 
     Purpose: Provides a base for creating projects with a self-organizing mesh of nodes using ESP Now.
 
-    Description: This sketch provides the core functinality needed to build ESP8266-based nodes that
+    Description: This sketch provides the core functinality needed to build ESP32-based nodes that
         auto-join a mesh of nearby nodes when powered up.
         Failed nodes will be removed from the mesh after a given number of failed communiation attempts.
         New nodes will automatically get re-joined to the active nodes when powered up.
@@ -44,13 +44,11 @@
      ---------------------------------------------------------------------------------------------------
  */
 
-#include <ESP8266WiFi.h>
-#include <espnow.h>
+#include <WiFi.h>
+#include <esp_now.h>
 
 #define DEBUG
 
-#define ESP_NOW_MAX_DATA_LEN 250
-#define ESP_NOW_SEND_SUCCESS 0
 #define MAX_PEERS 20
 
 // Strings used in the code are defined up front with the PROGMEM macro. This causes
@@ -63,7 +61,7 @@ const char OUTGOING_MSG_TEMPLATE_STR[] PROGMEM = "%s Message # %d";
 
 uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-typedef struct peer_info
+struct peer_info
 {
     char id[18];
     uint8_t address[6];
@@ -75,7 +73,7 @@ int peerCount = 0;
 
 bool ledOn = false;
 int messageCount = 0;
-char myName[14];
+char myName[25];
 
 
 /* ................................................................................................
@@ -87,7 +85,7 @@ char myName[14];
  * recorded MAC address. No MAC addresses need to be known at compile time!
  * ................................................................................................
  */
-void onDataReceived(uint8_t *senderMacAddress, uint8_t *data, uint8_t dataLen)
+void onDataReceived(const uint8_t *senderMacAddress, const uint8_t *data, int dataLen)
 {
     // only allow a maximum of 250 characters in the message + a null terminating byte
     char buffer[ESP_NOW_MAX_DATA_LEN + 1];
@@ -124,7 +122,7 @@ void onDataReceived(uint8_t *senderMacAddress, uint8_t *data, uint8_t dataLen)
  *  lets us track the number of active peers in the mesh.
  * ................................................................................................
  */
-void onDataSent(uint8_t *macAddr, uint8_t status)
+void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status)
 {
     if (status == ESP_NOW_SEND_SUCCESS)
     {
@@ -175,10 +173,10 @@ void onDataSent(uint8_t *macAddr, uint8_t status)
 void broadcast(const String &message)
 {
     // This will broadcast a message to everyone in range
-    uint8_t result = esp_now_send(broadcastAddress,  (uint8_t *) message.c_str(), message.length());
+    esp_err_t result = esp_now_send(broadcastAddress, (const uint8_t *) message.c_str(), message.length());
 
     #ifdef DEBUG
-    if (result != 0)
+    if (result != ESP_OK)
     {
         Serial.printf("Unknown error: %d\n", result);
     }
@@ -195,19 +193,19 @@ void sendMessage(const String &message, uint8_t *address)
     // This is required for ESP Now to be able to communicate to the address.
     if (!esp_now_is_peer_exist(address))
     {
-        esp_now_add_peer(address, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
         char macStr[18];
         formatMacAddress(address, macStr, 18);
+        addPeer(address, macStr);
 
         #ifdef DEBUG
         Serial.printf("Added peer: %s\n", macStr);
         #endif
     }
 
-    int32_t result = esp_now_send(address,  (uint8_t *) message.c_str(), message.length());
+    esp_err_t result = esp_now_send(address, (const uint8_t *) message.c_str(), message.length());
 
     #ifdef DEBUG
-    if (result != 0)
+    if (result != ESP_NOW_SEND_SUCCESS)
     {
         Serial.printf("Unknown error: %d\n", result);
     }
@@ -231,7 +229,7 @@ void formatMacAddress(const uint8_t *macAddress, char *buffer, int maxLength)
  *  With this, we can know at all times how many active peers are in our mesh.
  * ................................................................................................
  */
-void addPeer(uint8_t *macAddress, char *id)
+void addPeer(const uint8_t *macAddress, char *id)
 {
     strcpy(peers[peerCount].id, id);
 
@@ -240,8 +238,10 @@ void addPeer(uint8_t *macAddress, char *id)
         peers[peerCount].address[i] = macAddress[i];
     }
 
-    esp_now_add_peer(macAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
-
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(&peerInfo.peer_addr, macAddress, 6);
+    esp_now_add_peer(&peerInfo);
+    
     peerCount++;
 
     #ifdef DEBUG
@@ -317,18 +317,20 @@ void setup()
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
 
-    // Generate a node name using the unique chip ID of the ESP board.
-    snprintf(myName, 13, "Node-%08X", ESP.getChipId());
+    char macStr[18];
+    uint8_t macAddr[6];
+    WiFi.macAddress(macAddr);
+    formatMacAddress(macAddr, macStr, 18);
+    snprintf(myName, 30, "Node-%s", macStr);
+    myName[24] = 0;
 
     #ifdef DEBUG
-    Serial.printf("\nName: %s\nMAC Address: ", myName);
-    Serial.println(WiFi.macAddress());
+    Serial.printf("\nName: %s\n", myName);
     #endif
 
     // Startup ESP Now
     if (esp_now_init() == 0)
     {
-        esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
         esp_now_register_recv_cb(onDataReceived);
         esp_now_register_send_cb(onDataSent);
 
@@ -349,7 +351,11 @@ void setup()
     // The broadcast address is pre-registered as a peer with ESP Now so that we don't
     // have to perform a check (and possibly add) every time we call the broadcast() function.
     // We'll use the Combo role so that every node can both send and receive data.
-    esp_now_add_peer(broadcastAddress, ESP_NOW_ROLE_COMBO, 0, NULL, 0);
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(&peerInfo.peer_addr, broadcastAddress, 6);
+    esp_now_add_peer(&peerInfo);
+
+    messageCount = 0;
 }
 
 /* ................................................................................................
