@@ -173,14 +173,7 @@ void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status)
 void broadcast(const String &message)
 {
     // This will broadcast a message to everyone in range
-    esp_err_t result = esp_now_send(broadcastAddress, (const uint8_t *) message.c_str(), message.length());
-
-    #ifdef DEBUG
-    if (result != ESP_OK)
-    {
-        Serial.printf("Unknown error: %d\n", result);
-    }
-    #endif
+    sendMessage(message, broadcastAddress);
 }
 
 /* ................................................................................................
@@ -207,7 +200,7 @@ void sendMessage(const String &message, uint8_t *address)
     #ifdef DEBUG
     if (result != ESP_NOW_SEND_SUCCESS)
     {
-        Serial.printf("Unknown error: %d\n", result);
+        Serial.printf("Error: %d\n", result);
     }
     #endif
 }
