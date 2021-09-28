@@ -1,7 +1,7 @@
 /** ---------------------------------------------------------------------------------------------------
-    ESP NOW - Auto-forming mesh - ESP8266 Node
+    ESP NOW - Auto-forming mesh - ESP8266 Controller Node
 
-    Date: 2021-09-21
+    Date: 2021-09-26
 
     Author: David Alexis <https://github.com/davealexis>
 
@@ -18,16 +18,23 @@
         the MAC addresses of every node are known up-front (so they can be added to the code). This didn't
         seem practical. It would be much better if the mesh is self-forming from auto-discovering peers.
 
-        This sketch shows how to create a mesh of peers (no controller and worker nodes - all nodes are
-        equal). But it would not be difficult to extend it to have a single controller node. Two possible
-        auto-peering strategies in this architecture could be:
-        1. New nodes still send a broadcast when they power up, but only the controller node would respond
-           and add the node as a peer.
-        2. The controller MAC address could be the only known address (can be a custom MAC address). New
-           nodes would send a "peering request" message to the controller on startup, and the controller
-           would add them as peers.
-        In this one-to-many topology, only the controller knows about all the worker nodes, and would be
-        the only one they can communicate to.
+        The architecture implemented here shows how to create a mesh of peers, with this sketch serving
+        as the Controller. The auto-peering strategy is:
+        
+        Controller:
+            The controller node listens for peering requests broadcast from new nodes. Other nodes may receive
+            these broadcasts, but will ignore them. Only the controller responds.
+            1. Adds the node's MAC address to its list of known nodes
+            2. Send the node an Ack message to tell it that peering was done.
+
+            Listens for event messages from nodes.
+            1. Parses the event data
+            2. Acts on the data - e.g. sends the data to gateway node (like a Raspberry Pi) for storage
+
+            Sends command messages to nodes
+            1. Go to sleep
+            2. Reset
+            3. ...
 
         ** Note ** The ESP Now library for the ESP8266 is different from the one for the ESP32, for some
         reason. This is why there are separate examples for each platform.
@@ -44,6 +51,7 @@
      ---------------------------------------------------------------------------------------------------
  */
 
+#include <TaskScheduler.h>
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 
@@ -51,11 +59,13 @@
 
 #define ESP_NOW_MAX_DATA_LEN 250
 #define ESP_NOW_SEND_SUCCESS 0
-#define MAX_PEERS 20
+#define MAX_NODES 20
+#define PING_INTERVAL 5000
 
 // Strings used in the code are defined up front with the PROGMEM macro. This causes
 // the strings to be stored in flash instead of RAM.
-const char HELLO_MSG_STR[] PROGMEM = "-- Hello? Anyone there? --";
+const char ACK_MSG_STR[] PROGMEM = "ACK: Welcome!";
+const char PING_MSG_STR[] PROGMEM = "PING";
 const char ESP_NOW_INIT_FAILURE_MSG_STR[] PROGMEM = "ESP Now failed to initialize. Will restart in 3 seconds.";
 const char INITIALIZED_MSG_STR[] PROGMEM = "ESP Now initialized";
 const char PEER_ADDED_TEMPLATE_STR[] PROGMEM = "Added peer: %s. %d active peers.\n";
@@ -63,15 +73,15 @@ const char OUTGOING_MSG_TEMPLATE_STR[] PROGMEM = "%s Message # %d";
 
 uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-typedef struct peer_info
+typedef struct node_info
 {
     char id[18];
     uint8_t address[6];
     int failures;
 };
 
-peer_info peers[MAX_PEERS] = {};
-int peerCount = 0;
+node_info nodes[MAX_NODES] = {};
+int nodeCount = 0;
 
 const bool ledOn = false;
 const bool ledOff = true;
@@ -79,13 +89,40 @@ const uint8_t ledPin = LED_BUILTIN;
 int messageCount = 0;
 char myName[14];
 
+void pingHandler();
+
+// Define tasks
+Task pingTask(PING_INTERVAL, TASK_FOREVER, &pingHandler);
+Scheduler taskRunner;
+
+/* ................................................................................................
+ *  pingHandler() is periodically called by the Task Scheduler in the background.
+ *  It sends out pings to all known nodes. The onDataSent() handler will manage removing dead
+ *  nodes when transmission attempts fail.
+ * ................................................................................................
+ */
+void pingHandler()
+{
+    // Send ping to each known node
+    if (nodeCount != 0)
+    {
+        blink(100);
+        
+        for (int i = 0; i < nodeCount; i++)
+        {
+            sendMessage(PING_MSG_STR, nodes[i].address);
+        }
+
+        blink(300);
+    }
+}
 
 /* ................................................................................................
  * onDataReceived() is the callback function that ESP Now calls whenever data is received from
  * another node.
- * The main thing we want to set up here is the auto-peering of incomming MAC addresses that we
+ * The main thing we want to set up here is the auto-peering of incoming MAC addresses that we
  * have not seem before. We'll register the address as a peer with ESP Now, but also store it in
- * our own list of known peers. This enables sending messages to each individual peer using their
+ * our own list of known nodes. This enables sending messages to each individual node using their
  * recorded MAC address. No MAC addresses need to be known at compile time!
  * ................................................................................................
  */
@@ -107,15 +144,28 @@ void onDataReceived(uint8_t *senderMacAddress, uint8_t *data, uint8_t dataLen)
     Serial.printf("Received message from: %s - %s\n", macStr, buffer);
     #endif
 
+
     // If we don't know about the incoming mac address, let's peer up with it.
-    if (peerCount < MAX_PEERS && !esp_now_is_peer_exist(senderMacAddress))
+    if (nodeCount < MAX_NODES && !esp_now_is_peer_exist(senderMacAddress))
     {
         addPeer(senderMacAddress, macStr);
+    }
+    else
+    {
+        char *token = strtok(buffer, ":");
+
+        if (strcmp(token, "PEER") == 0)
+        {
+            sendMessage(ACK_MSG_STR, senderMacAddress);
+            
+            #ifdef DEBUG
+            Serial.printf("Sent Ack to known node %s\n", macStr);
+            #endif
+        }
     }
 
     // Now that we have the incoming data parsed and we know who its coming from
     // we can route the message to a handler that can perform some sort of action.
-    // TODO: Add call to handler to process received data.
 }
 
 /* ................................................................................................
@@ -149,17 +199,17 @@ void onDataSent(uint8_t *macAddr, uint8_t status)
         return;
     }
 
-    peers[peerIndex].failures++;
+    nodes[peerIndex].failures++;
 
     #ifdef DEBUG
-    Serial.printf("Message sent to: %s failed %d times\n", macStr, peers[peerIndex].failures);
+    Serial.printf("Message sent to: %s failed %d times\n", macStr, nodes[peerIndex].failures);
     #endif
 
-    if (peers[peerIndex].failures >= 4)
+    if (nodes[peerIndex].failures >= 4)
     {
         // Peer is dead. Remove.
         removePeer(peerIndex);
-        peers[peerIndex].failures = 0;
+        nodes[peerIndex].failures = 0;
 
         #ifdef DEBUG
         Serial.printf("Peer %s removed\n", macStr);
@@ -228,20 +278,23 @@ void formatMacAddress(const uint8_t *macAddress, char *buffer, int maxLength)
  */
 void addPeer(uint8_t *macAddress, char *id)
 {
-    strcpy(peers[peerCount].id, id);
+    strcpy(nodes[nodeCount].id, id);
 
     for (int i = 0; i < 6; i++)
     {
-        peers[peerCount].address[i] = macAddress[i];
+        nodes[nodeCount].address[i] = macAddress[i];
     }
 
     esp_now_add_peer(macAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
 
-    peerCount++;
+    nodeCount++;
 
     #ifdef DEBUG
-    Serial.printf(PEER_ADDED_TEMPLATE_STR, id, peerCount);
+    Serial.printf(PEER_ADDED_TEMPLATE_STR, id, nodeCount);
     #endif
+
+    // Send ACK message to newly added node
+    sendMessage(ACK_MSG_STR, macAddress);
 }
 
 /* ................................................................................................
@@ -254,30 +307,30 @@ void addPeer(uint8_t *macAddress, char *id)
 // Deletes a peer from the list of registered peers (the peers[] array).
 void removePeer(int peerIndex)
 {
-    esp_now_del_peer(peers[peerIndex].address);
+    esp_now_del_peer(nodes[peerIndex].address);
 
     // Pack list to remove current item
-    if (peerIndex < MAX_PEERS)
+    if (peerIndex < MAX_NODES)
     {
-        for (int p = peerIndex + 1; p < peerCount; p++)
+        for (int p = peerIndex + 1; p < nodeCount; p++)
         {
-            strcpy(peers[peerIndex].id, peers[p].id);
+            strcpy(nodes[peerIndex].id, nodes[p].id);
 
             for (int a = 0; a < 6; a++)
             {
-                peers[peerIndex].address[a] = peers[p].address[a];
+                nodes[peerIndex].address[a] = nodes[p].address[a];
             }
         }
     }
 
     // Wipe last entry
-    memset(peers[peerCount - 1].id, 0, sizeof(peers[peerCount - 1].id));
-    memset(peers[peerCount - 1].address, 0, sizeof(peers[peerCount - 1].address));
+    memset(nodes[nodeCount - 1].id, 0, sizeof(nodes[nodeCount - 1].id));
+    memset(nodes[nodeCount - 1].address, 0, sizeof(nodes[nodeCount - 1].address));
 
-    peerCount--;
+    nodeCount--;
 
     #ifdef DEBUG
-    Serial.printf("%d Peers\n", peerCount);
+    Serial.printf("%d Peers\n", nodeCount);
     #endif
 }
 
@@ -288,9 +341,9 @@ void removePeer(int peerIndex)
  */
 int findPeer(char *peerId)
 {
-    for (int i = 0; i < peerCount; i++)
+    for (int i = 0; i < nodeCount; i++)
     {
-        if (strcmp(peerId, peers[i].id) == 0)
+        if (strcmp(peerId, nodes[i].id) == 0)
         {
             return i;
         }
@@ -357,6 +410,15 @@ void setup()
     // have to perform a check (and possibly add) every time we call the broadcast() function.
     // We'll use the Combo role so that every node can both send and receive data.
     esp_now_add_peer(broadcastAddress, ESP_NOW_ROLE_COMBO, 0, NULL, 0);
+
+    // Initialize and start our background Task.
+    taskRunner.init();
+    taskRunner.addTask(pingTask);
+    pingTask.enable();
+
+    #ifdef DEBUG
+    Serial.println("Controller starting up");
+    #endif
 }
 
 /* ................................................................................................
@@ -367,36 +429,9 @@ void setup()
  * ................................................................................................
  */
 void loop()
-{
-    // If we have at least one peer, then let's send messages to them.
-    if (peerCount != 0)
-    {
-        digitalWrite(ledPin, ledOn);
-        
-        messageCount++;
-        char msg[50];
-        sprintf(msg, OUTGOING_MSG_TEMPLATE_STR, myName, messageCount);
-
-        for (int i = 0; i < peerCount; i++)
-        {
-            sendMessage(msg, peers[i].address);
-        }
-
-        delay(1000);
-        digitalWrite(ledPin, ledOff);
-    }
-    else
-    {
-        #ifdef DEBUG
-        Serial.println("Looking for peers");
-        #endif
-
-        blink(200);
-        blink(200);
-        broadcast(HELLO_MSG_STR);
-        blink(200);
-        blink(200);
-    }
-
-    delay(1000);
+{   
+    // All that is needed here is a call to start up the task scheduler
+    // engine, which takes care of continually running our main logic task
+    // in the background.
+    taskRunner.execute();
 }

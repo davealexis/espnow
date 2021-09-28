@@ -71,7 +71,9 @@ struct peer_info
 peer_info peers[MAX_PEERS] = {};
 int peerCount = 0;
 
-bool ledOn = false;
+const bool ledOn = false;
+const bool ledOff = true;
+const uint8_t ledPin = LED_BUILTIN;
 int messageCount = 0;
 char myName[25];
 
@@ -363,6 +365,8 @@ void loop()
     // If we have at least one peer, then let's send messages to them.
     if (peerCount != 0)
     {
+        digitalWrite(ledPin, ledOn);
+        
         messageCount++;
         char msg[50];
         sprintf(msg, OUTGOING_MSG_TEMPLATE_STR, myName, messageCount);
@@ -371,6 +375,9 @@ void loop()
         {
             sendMessage(msg, peers[i].address);
         }
+
+        delay(1000);
+        digitalWrite(ledPin, ledOff);
     }
     else
     {
@@ -378,8 +385,12 @@ void loop()
         Serial.println("Looking for peers");
         #endif
 
+        blink(200);
+        blink(200);
         broadcast(HELLO_MSG_STR);
+        blink(200);
+        blink(200);
     }
 
-    delay(2000);
+    delay(1000);
 }
