@@ -1,37 +1,37 @@
 /** ---------------------------------------------------------------------------------------------------
-    ESP NOW - Auto-forming mesh - ESP8266 Worker Node
+    ESP NOW - Controller/Worker Topology - ESP8266 Worker Node
 
     Date: 2021-09-27
 
     Author: David Alexis <https://github.com/davealexis>
 
-    Purpose: Provides a base for creating projects with a self-organizing mesh of nodes using ESP Now.
+    Purpose: Provides a base for creating IoT projects based on the controller/worker topology. This
+        sketch provides the core Worker node functionality, and can be expanded or modified to suit.
 
     Description: This sketch provides the core functinality needed to build ESP8266-based nodes that
-        auto-join a mesh of nearby nodes when powered up.
-        Failed nodes will be removed from the mesh after a given number of failed communiation attempts.
-        New nodes will automatically get re-joined to the active nodes when powered up.
+        auto-join a network with a controller node when powered up.
+        Failed nodes will be removed from the network after a given number of failed communiation attempts.
+        New nodes will automatically get re-joined to the controller when powered back up.
 
-        The mesh can contain both ESP8266 and ESP32 nodes.
+        The network can contain both ESP8266 and ESP32 nodes.
 
         There were lots of examples showing how to communicate between nodes, but they all assume that
         the MAC addresses of every node are known up-front (so they can be added to the code). This didn't
         seem practical. It would be much better if the mesh is self-forming from auto-discovering peers.
 
-        The architecture implemented here shows how to create a mesh of peers, with this sketch serving
-        as the Controller. The auto-peering strategy is:
-        
-        Worker Node:
-            The worker node needs to perform two main actions:
-            1. Send a peering request to the Controller node on startup. It keeps sending the request
-               broadcast until the Controller responds with an ACK message, indicating that peering
-               was successful.
-            2. Perform its main duty of periodically sending data to the Controller. This could be data
-               read from sensors, for example.
-            3. Listen for incoming notifications and commands from the Controller. These are mostly
-               Ping requests that can be ignored, since ESP Now takes care of letting the controller
-               know if the Node received the transmission. The controller can potentially send commands
-               to tell the Node to do things like reset or do an immediate sensor reading.
+        The architecture implemented here shows how to create a topology with a controller and many
+        worker nodes, with this sketch serving as the worker node. The auto-peering strategy is:
+
+        The worker node needs to perform two main actions:
+        1. Send a peering request to the Controller node on startup. It keeps sending the request
+            broadcast until the Controller responds with an ACK message, indicating that peering
+            was successful.
+        2. Perform its main duty of periodically sending data to the Controller. This could be data
+            read from sensors, for example.
+        3. Listen for incoming notifications and commands from the Controller. These are mostly
+            Ping requests that can be ignored, since ESP Now takes care of letting the controller
+            know if the Node received the transmission. The controller can potentially send commands
+            to tell the Node to do things like reset or do an immediate sensor reading.
 
         ** Note ** The ESP Now library for the ESP8266 is different from the one for the ESP32, for some
         reason. This is why there are separate examples for each platform.
@@ -283,7 +283,9 @@ void incomingMessageHandler()
 }
 
 /* ................................................................................................
- *
+ * dataSenderHandler() is the background Task handler that will periodically send data
+ * (e.g. sensor data) back to the Controller. It is also responsible for initially sending a
+ * peering request to the Controller on startup.
  * ................................................................................................
  */
 void dataSenderHandler()
@@ -378,13 +380,7 @@ void setup()
     #endif
 }
 
-/* ................................................................................................
- * Initially, we'll have no known peers. So we want to broadcast (advertise) ourselves to invite
- * other nodes in the mesh to peer with us. Once we have at least one peer, we don't need to
- * continue advertising. This is because even the nodes that missed our transmission will send
- * their own broadcast when they power up, and we'll receive that (and auto-peer with them).
- * ................................................................................................
- */
+// ................................................................................................
 void loop()
 {
     // All that is needed here is a call to start up the task scheduler
